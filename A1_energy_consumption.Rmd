@@ -1,0 +1,318 @@
+---
+title: "Energy Consumption in the Bay Area"
+author: "Francine Stephens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = T, warning = F, message = F)
+```
+
+# Research Question: How has the COVID-19 Pandemic impacted energy consumption in the Bay Area?
+
+**About the Data:**
+This analysis draws on energy consumption data from PGE from 2017 through the third quarter of 2020. Gas and electric energy consumption by residential and commerical customers are considered in the analysis. The data are aggregated to zipcodes.
+
+``` {r, libraries, include = F}
+### LIBRARIES
+packages <- c("dplyr",
+              "tidyverse",
+              "rgdal",
+              "sp",
+              "sf",
+              "ggplot2",
+              "plotly",
+              "tigris",
+              "leaflet",
+              "RColorBrewer"
+              )
+lapply(packages, library, character.only = T)
+
+setwd("~/Stanford/energy_consumption_Bay_Area")
+
+``` 
+
+``` {r, Set-up}
+### SET-UP
+
+# PARAMETERS
+years <- 2017:2020
+quarters <- 1:4
+pge_Elec_All <- NULL
+pge_Gas_All <- NULL
+energy_types <- c(
+  "Elec- Residential",
+  "Elec- Commercial",
+  "Gas- Residential",
+  "Gas- Commercial"
+)
+bay_county_names <- c(
+  "Alameda",
+  "Contra Costa",
+  "Marin",
+  "Napa",
+  "San Francisco",
+  "San Mateo",
+  "Santa Clara",
+  "Solano",
+  "Sonoma"
+)
+
+## IMPORT ELECTRIC DATA
+for (quarter in quarters){
+  for (year in years){
+    if (year == 2020 & quarter == 4){
+      next()
+    }
+      filename <-
+        paste0(
+          "PGE_",
+          year,
+          "_Q",
+          quarter,
+          "_",
+          "ElectricUsageByZip.csv"
+        )
+      print(filename)
+      
+  temp <- read_csv(filename)
+  pge_Elec_All <- rbind(pge_Elec_All, temp)
+    }
+  }
+
+
+## IMPORT GAS DATA
+for (quarter in quarters){
+  for (year in years){
+    if (year == 2020 & quarter == 4){
+      next()
+    }
+      filename <-
+        paste0(
+          "PGE_",
+          year,
+          "_Q",
+          quarter,
+          "_",
+          "GasUsageByZip.csv"
+        )
+      print(filename)
+      
+  temp <- read_csv(filename)
+
+  pge_Gas_All <- rbind(pge_Gas_All, temp)
+
+    }
+  }
+
+
+# IMPORT SHAPEFILES
+usa_zips <- zctas(cb = T, progress_bar = F)
+
+bay_counties <- counties("CA", cb = T, progress_bar = F) %>%
+  filter(
+    NAME %in% bay_county_names
+    )
+
+```
+
+# Key Data Preparation Decisions
+
+* **Units for energy consumption are kBTUs.** 
+* **The amount of energy consumption by type and year was calculated and graphed for the Bay Area.** Energy consumption was aggregated across all the zipcodes by type of energy and month-year. 
+* **Pre-pandemic and pandemic residential energy consumption was compared at the zipcode level in a choropleth map.** In this comparison, *pre-pandemic is defined as March through September 2019* and *the pandemic time span is defined as March through September 2020.* I selected the same range of months for this comparison because energy consumption is driven by seasonal changes in the weather/climate, so comparing similar time bands would create more of an apples to apples comparison than comparing the 3-quarters directly prior to the the COVID-19 outbreak.
+* **The unit of comparison for energy consumption pre-pandemic and pandemic is the percent change in total residential energy consumed.** Percent change should be more easily interpretable than change in total kBTUs, especially for lay-audiences. 
+
+
+```{r data cleaning}
+#### DATA CLEANING
+
+### STACK ENERGY DATA FOR ANALYSIS
+pge_Elec_kbtu <- pge_Elec_All %>%
+  mutate(TotalkBTU = TOTALKWH * 3.412) %>%
+  select(-ends_with("KWH"))
+
+pge_Gas_kbtu <- pge_Gas_All %>%
+  mutate(TotalkBTU = TOTALTHM * 100) %>%
+  select(-ends_with("THM")) 
+
+pge_Gas_Elec <- rbind(pge_Gas_kbtu, pge_Elec_kbtu) 
+saveRDS(pge_Gas_Elec, "pge_Gas_Elec.rds")
+
+### SUMMARY OF ENERGY CONSUMPTION OVER TIME IN BAY AREA
+pge_consumption_time <- pge_Gas_Elec %>%
+  filter(CUSTOMERCLASS %in% energy_types) %>%
+  select(MONTH, YEAR, CUSTOMERCLASS, TotalkBTU) %>%
+  group_by(MONTH, YEAR, CUSTOMERCLASS) %>% 
+  summarize(Bay_Area_Total_kBTU = sum(TotalkBTU, na.rm = T)) %>%
+  mutate(Energy_Types = case_when(
+        CUSTOMERCLASS =="Elec- Commercial" ~ "Electric - Commercial",
+        CUSTOMERCLASS =="Elec- Residential" ~ "Electric - Residential",
+        CUSTOMERCLASS =="Gas- Commercial" ~ "Gas - Commercial",
+        CUSTOMERCLASS =="Gas- Residential" ~ "Gas - Residential"), 
+        Energy_Types = factor(Energy_Types,
+                               levels = c("Electric - Commercial",
+                               "Electric - Residential",
+                               "Gas - Commercial", 
+                               "Gas - Residential"
+                                 )))
+
+### PRE-PANDEMIC VS. PANDEMIC CONSUMPTION BY ZIPCODE
+pge_consumption_2019_2020 <- pge_Gas_Elec  %>% 
+  select(
+    ZIPCODE:CUSTOMERCLASS,
+    TotalkBTU
+    ) %>%
+  filter(YEAR > 2018 & 
+           (MONTH > 2 & MONTH < 10) &
+           grepl("Residential", CUSTOMERCLASS)) %>%
+  group_by(
+    ZIPCODE,
+    YEAR
+    ) %>%
+  summarize(
+    TotalkBTU_per_Zip = sum(TotalkBTU, na.rm = T)
+            )
+  
+pge_consumption_pandemic_wide <- 
+  pge_consumption_2019_2020 %>%
+  pivot_wider(
+    names_from = YEAR, 
+    values_from = TotalkBTU_per_Zip
+    )  %>%
+  mutate(
+    Diff_Yr_Total_kBTU =  `2020` - `2019`,
+    Pct_Chg_Total_kBTU = ((Diff_Yr_Total_kBTU/`2019`) * 100),
+    )
+
+pge_consumption_pandemic_wide[] <- Map(
+  function(x) replace(
+    x,
+    is.infinite(x),
+    NA),
+  pge_consumption_pandemic_wide)
+
+
+### GEOPROCESSING
+bay_counties <- st_transform(bay_counties, 4326)
+
+bay_zips <- usa_zips %>%
+  st_transform(4326) %>%
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(usa_zips %>% select(GEOID10)) %>% 
+  st_as_sf() %>%
+  mutate(ZIPCODE = as.numeric(GEOID10))
+
+consumption_pandemic_wide_shp <- left_join(
+            bay_zips,
+            pge_consumption_pandemic_wide,
+            by = c("ZIPCODE")) %>%
+  st_as_sf() %>% 
+  st_transform(4326)
+
+```
+
+# Findings
+The line graphs in Figure 1 highlight patterns in different types of energy utilization as well as change over time. 
+
+``` {r plot energy consumption over time, echo = T}
+### LINE GRAPH - ENERGY CONSUMPTION BY TIME AND ENERGY TYPE
+energy_line_graph <- 
+  ggplot(pge_consumption_time,
+       aes(
+           x = MONTH %>% factor(labels = month.abb),
+           y = Bay_Area_Total_kBTU,
+           group = YEAR %>% factor(),
+           color = YEAR %>% factor())
+       ) +
+        geom_line(size = 1) + 
+        geom_point(size = 1) +
+        scale_color_brewer(palette = "Spectral") +
+        labs(
+          title = "Figure 1: Energy Consumption in the Bay Area",
+          color = "Year",
+          y = "Energy<br>in kBTU",
+          x = ""
+          ) + 
+  scale_y_continuous(labels = scales::label_number_si()) +
+  scale_x_discrete(limits = month.abb) +
+  facet_wrap(~ Energy_Types) +
+  theme_bw(base_size = 10) + 
+  theme(axis.text.x = element_text(angle = 90),
+        axis.title.y = element_text(size = rel(1), angle = 0, vjust = 0)
+        )
+  
+energy_line_graph %>%
+  ggplotly() %>%
+  layout(
+    xaxis = list(fixedrange = T),
+    yaxis = list(fixedrange = T)
+  ) %>%
+  config(displayModeBar = F)
+
+```
+
+
+**Residential electricity consumption increased with the onset of the COVID-19 pandemic, whereas commercial consumption of electricity declined.** In March, both residential and commercial electrical consumption was just over 7 billion kBTUs. However, residential electrical consumption was higher in 2020 than in the previous three years starting in March and continuing up to June. June was the month in which the region's shelter in place order was lifted and more non-essential businesses were opened for people to patronize. By contrast, on the commercial side, electrical energy consumption in March and April were lowest in 2020 compared to previous years.Commercial electrical consumption increases after April, which parallels the slow re-opening of non-essential business, and this increase continues through August, when it starts to plateau. 
+
+**Weather and increasing COVID-19 case rate may be influencing electrical consumption in late summer.** Residential electric consumption peaks in August, around the time when the region was suffering from extreme heat and fires. It is noteworthy that other years, though especially 2017, saw similar patterns of peak electrical consumption around August and September - the warmest months for the region. It is also noteworthy that residential electrical consumption ranged from 7.1 billion to 11 billion kBTUs over this period, whereas the range was narrower - 7.2 billion to 7.7 bullion - for commercial electrical consumption.
+
+**Residential gas consumption was higher than commercial gas consumption in 2020.**  2020 followed the same trend as previous years with gas consumption decreasing as of March, however, the decrease was not as steep as previous years for residential, which puts the 2020 gas consumption levels just a little higher than previous years. Again, this is likely due to more people using this energy under the stay at home orders. On the commercial side the decrease in gas consumption after March follows the pattern of previous years more closely. 
+
+**Residential energy consumption - gas and electric - in 2020 tended to be higher than previous years in the first few months of the pandemic, whereas electric commercial consumption was clearly depressed.** During the late summer months, consumption was also high, although not as high as 2017 levels, which suggests extreme weather conditions are also playing a role in consumption.
+
+
+
+The map in Figure 2 shows the change in residential energy consumption during the pandemic compared to 2019. 
+
+``` {r Map energy consumption over time, echo = T}
+### MAP CHANGE IN ENERGY CONSUMPTION FROM PRE-PANDEMIC LEVELS
+consumption_pal <- colorNumeric(
+  palette = "RdYlBu",
+  domain = consumption_pandemic_wide_shp$Pct_Chg_Total_kBTU,
+  reverse = T
+)
+
+leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(
+    data = consumption_pandemic_wide_shp,
+    fillColor = ~consumption_pal(Pct_Chg_Total_kBTU),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(Pct_Chg_Total_kBTU), 
+      "% Change in Residential Energy Consumption in ",
+      ZIPCODE
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = consumption_pandemic_wide_shp,
+    pal = consumption_pal,
+    values = ~Pct_Chg_Total_kBTU,
+    title = "Percent Change in Energy Consumption,<br>
+    March-September 2019 vs. March-September 2020"
+  )
+
+```
+
+**The percent change in residential energy consumption from 2019 levels ranged from -43.5% to 24.4%, with the average falling at 8.1%.** 
+
+**The greatest decrease in residential energy consumption occured in a zipcode in the northern portion of the city of Petuluma (94954) and the downtown-business district of Oakland (94612).** These areas could have more commercial customers than residential customers. 
+
+**The highest increases in residential energy consumption tend to be among zipcodes on the western edge of the Bay Area, and in zipcodes along the sides of San Francisco and Oakland that are facing the inner bay.** 
+
+
+# Note on assumptions and data caveats
+
+* **Zipcodes are not the most ideal unit for measuring energy consumption at the neighborhood level.** A more granular geographic unit like Census tracts or block groups would be more ideal for capturing energy consumption at the neighborhood level. 
+* **This analysis does not comprehensively take into account fluctuations in weather patterns from year to year.** This motivated the decision for comparing pre-pandemic consumption with pandemic consumption. Clearly, 2017 had a high consumption period from August through September, moreso than the later years. This could be due not only to the weather, but also that in the following years the company shutting off power to some residents or residents switching over to other electricity providers due to dissatisfaction with the company. 
+
